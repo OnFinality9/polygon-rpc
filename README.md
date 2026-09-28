@@ -1,52 +1,80 @@
-# Polygon RPC Getting Started
+# Polygon Chain RPC: Connect Existing EVM Tooling and Handle POL Fees
 
-A practical guide to Polygon PoS JSON-RPC covering network verification, blocks, balances, contracts, logs, and receipts.
+Polygon's current developer documentation treats Polygon Chain as an EVM-compatible chain: existing Solidity contracts and tools such as Foundry, Hardhat, ethers, and web3.js can be pointed at a Polygon RPC endpoint without changing the contract language or JSON-RPC model.
 
-## RPC endpoint
+The current mainnet settings are:
 
-```text
-https://polygon.api.onfinality.io/public
-```
+| Property | Value |
+| --- | --- |
+| Chain ID | `137` |
+| Parent chain | Ethereum |
+| Gas token | POL |
+| Explorer | Polygonscan |
 
-Polygon PoS is EVM-compatible and uses chain ID `137`.
-
-## 1. Verify Polygon PoS Mainnet
+Polygon's official RPC-provider list includes OnFinality, so the examples below use:
 
 ```bash
-curl -s https://polygon.api.onfinality.io/public \
+export POLYGON_RPC=https://polygon.api.onfinality.io/public
+```
+
+## Quick connection test with raw JSON-RPC
+
+```bash
+curl -s "$POLYGON_RPC" \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
 ```
 
-Expected result: `0x89`.
+Expected result:
 
-## 2. Get the latest block
-
-```bash
-curl -s https://polygon.api.onfinality.io/public \
-  -H 'content-type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}'
+```json
+{"jsonrpc":"2.0","id":1,"result":"0x89"}
 ```
 
-## 3. Read a POL balance
+`0x89` is decimal `137`.
+
+## If you use Foundry, test the RPC with `cast`
 
 ```bash
-curl -s https://polygon.api.onfinality.io/public \
-  -H 'content-type: application/json' \
-  --data '{
-    "jsonrpc":"2.0",
-    "id":1,
-    "method":"eth_getBalance",
-    "params":["0xYOUR_ADDRESS","latest"]
-  }'
+cast chain-id --rpc-url "$POLYGON_RPC"
+cast block-number --rpc-url "$POLYGON_RPC"
 ```
 
-The RPC result is a hex-encoded wei value.
-
-## 4. Read contract state
+Read a native POL balance:
 
 ```bash
-curl -s https://polygon.api.onfinality.io/public \
+cast balance 0xYOUR_ADDRESS --rpc-url "$POLYGON_RPC"
+```
+
+Foundry is useful here because Polygon is EVM-compatible; there is no Polygon-specific transaction format to learn for ordinary contract deployment and calls.
+
+## Point Hardhat at Polygon Chain
+
+A minimal Hardhat network entry looks like this:
+
+```js
+export default {
+  solidity: '0.8.28',
+  networks: {
+    polygon: {
+      url: 'https://polygon.api.onfinality.io/public',
+      chainId: 137,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
+  },
+};
+```
+
+Do not commit the private key to the repository. Load it from a secret manager or environment variable.
+
+With the RPC URL and chain ID configured, normal Ethereum deployment scripts work on Polygon Chain.
+
+## Read a contract directly
+
+At the JSON-RPC layer, a read-only contract call is `eth_call`:
+
+```bash
+curl -s "$POLYGON_RPC" \
   -H 'content-type: application/json' \
   --data '{
     "jsonrpc":"2.0",
@@ -59,10 +87,37 @@ curl -s https://polygon.api.onfinality.io/public \
   }'
 ```
 
-## 5. Query event logs
+For ABI-heavy applications, let Foundry, viem, or ethers encode the calldata.
+
+## Polygon has a dedicated Gas Station
+
+Polygon's official Gas Station builds recommendations from recent `eth_feeHistory` data. For mainnet, query:
 
 ```bash
-curl -s https://polygon.api.onfinality.io/public \
+curl -s https://gasstation.polygon.technology/v2
+```
+
+The response contains `safeLow`, `standard`, and `fast` suggestions with `maxPriorityFee` and `maxFee` values.
+
+Polygon's current documentation also specifies a minimum priority fee on mainnet, so copying fee assumptions from Ethereum Mainnet is not a good strategy.
+
+If you prefer to stay entirely inside JSON-RPC, you can inspect fee history directly:
+
+```bash
+curl -s "$POLYGON_RPC" \
+  -H 'content-type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"eth_feeHistory",
+    "params":["0xF","latest",[10,25,50]]
+  }'
+```
+
+## Build an event indexer in bounded windows
+
+```bash
+curl -s "$POLYGON_RPC" \
   -H 'content-type: application/json' \
   --data '{
     "jsonrpc":"2.0",
@@ -71,17 +126,40 @@ curl -s https://polygon.api.onfinality.io/public \
     "params":[{
       "fromBlock":"0xSTART_BLOCK",
       "toBlock":"0xEND_BLOCK",
-      "address":"0xCONTRACT_ADDRESS"
+      "address":"0xCONTRACT_ADDRESS",
+      "topics":[]
     }]
   }'
 ```
 
-Keep ranges bounded. Smaller windows are easier to retry and less likely to hit execution limits.
+For production indexing:
 
-## 6. Check a transaction receipt
+1. choose a bounded block range;
+2. process and persist the results;
+3. save the last successful block;
+4. continue from that checkpoint;
+5. retry a smaller window when a provider rejects a large response.
+
+This is much more robust than repeatedly querying a huge range ending at `latest`.
+
+## MATIC vs POL
+
+Older tutorials, contracts, dashboards, and wallet screens may still say **MATIC**. Polygon's current documentation uses **POL** as the native gas and staking token on Polygon Chain.
+
+When migrating an older integration, check more than the RPC URL:
+
+- UI labels and token symbols;
+- fee accounting;
+- bridge assumptions;
+- environment variables that still use `MATIC_*` names;
+- monitoring rules that search logs for old terminology.
+
+The chain ID remains `137`, so token naming migrations can otherwise be easy to miss.
+
+## Read a receipt after deployment or execution
 
 ```bash
-curl -s https://polygon.api.onfinality.io/public \
+curl -s "$POLYGON_RPC" \
   -H 'content-type: application/json' \
   --data '{
     "jsonrpc":"2.0",
@@ -91,65 +169,12 @@ curl -s https://polygon.api.onfinality.io/public \
   }'
 ```
 
-Useful fields include `status`, `blockNumber`, `gasUsed`, and `logs`.
+Useful fields are `status`, `contractAddress`, `gasUsed`, and `logs`. A successful broadcast is not the same as successful EVM execution; always inspect the receipt.
 
-## 7. JavaScript example
+## References
 
-```js
-const RPC_URL = 'https://polygon.api.onfinality.io/public';
-
-async function rpc(method, params = []) {
-  const res = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: {'content-type': 'application/json'},
-    body: JSON.stringify({jsonrpc: '2.0', id: 1, method, params}),
-  });
-
-  const body = await res.json();
-  if (body.error) throw new Error(body.error.message);
-  return body.result;
-}
-
-const chainId = Number.parseInt(await rpc('eth_chainId'), 16);
-if (chainId !== 137) throw new Error(`Unexpected chain ID: ${chainId}`);
-console.log(Number.parseInt(await rpc('eth_blockNumber'), 16));
-```
-
-## Polygon PoS execution vs consensus
-
-Application-facing Ethereum JSON-RPC requests are served by the Polygon PoS execution layer. Normal dApps, wallets, and backends generally do not need to interact directly with validator/checkpoint coordination just to read state or send transactions.
-
-## Troubleshooting
-
-### `eth_getLogs` is slow
-
-Shrink the block range and checkpoint progress.
-
-### Address exists on Ethereum but not Polygon
-
-Contract deployments and state are chain-specific.
-
-### Historical state is unavailable
-
-Old block/state queries can require archive access.
-
-### MATIC vs POL
-
-Current Polygon PoS documentation uses POL as the native token. Older documentation and tooling may still contain MATIC terminology.
-
-## Mainnet settings
-
-| Setting | Value |
-| --- | --- |
-| Network | Polygon PoS Mainnet |
-| Chain ID | `137` |
-| Native token | POL |
-| RPC | `https://polygon.api.onfinality.io/public` |
-| WebSocket | `wss://polygon.api.onfinality.io/public-ws` |
-| Explorer | `https://polygonscan.com` |
-
-## Resources
-
-- [Polygon PoS documentation](https://docs.polygon.technology/pos/)
+- [Polygon Chain RPC endpoints](https://docs.polygon.technology/pos/reference/rpc-endpoints/)
+- [Building on Polygon Chain](https://docs.polygon.technology/pos/get-started/building-on-polygon/)
+- [Polygon Gas Station](https://docs.polygon.technology/tools/gas/polygon-gas-station/)
 - [OnFinality Polygon RPC](https://onfinality.io/en/networks/polygon)
-- [OnFinality RPC network directory](https://onfinality.io/en/networks)
+- [OnFinality network directory](https://onfinality.io/en/networks)
